@@ -15,7 +15,13 @@ from src.git_manager import GitManager
 from src.file_manager import FileManager
 from src.ui.console_widget import ConsoleWidget
 
-CONFIG_FILE = "config.json"
+if getattr(sys, 'frozen', False):
+    APP_PATH = os.path.dirname(sys.executable)
+else:
+    APP_PATH = os.path.dirname(os.path.abspath(__file__))
+    APP_PATH = os.path.dirname(os.path.dirname(APP_PATH)) # Go up two levels from src/main_window.py to root
+
+CONFIG_FILE = os.path.join(APP_PATH, "config.json")
 
 class WorkerThread(QThread):
     log_signal = pyqtSignal(str)
