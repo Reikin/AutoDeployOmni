@@ -7,7 +7,8 @@ from datetime import datetime
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QPushButton, QFileDialog, 
                              QTabWidget, QMessageBox, QGroupBox, QComboBox, QCheckBox, 
-                             QListWidget, QAbstractItemView, QSizePolicy, QInputDialog, QProgressBar, QGridLayout)
+                             QListWidget, QAbstractItemView, QSizePolicy, QInputDialog, QProgressBar, QGridLayout,
+                             QSplitter)
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
 from src.ssh_manager import SSHManager
@@ -26,6 +27,7 @@ CONFIG_FILE = os.path.join(APP_PATH, "config.json")
 class WorkerThread(QThread):
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int)
+    command_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, object)
 
     def __init__(self, task_func, *args, **kwargs):
@@ -66,9 +68,17 @@ class MainWindow(QMainWindow):
         self.load_ui_values()
 
     def init_ui(self):
-        main_widget = QWidget()
-        self.setCentralWidget(main_widget)
-        main_layout = QVBoxLayout(main_widget)
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        central_layout = QVBoxLayout(central_widget)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        central_layout.addWidget(self.splitter)
+
+        # Left Panel (Main Content)
+        left_widget = QWidget()
+        main_layout = QVBoxLayout(left_widget)
 
         # Tabs
         self.tabs = QTabWidget()
@@ -90,8 +100,54 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(QLabel("Progress:"))
         main_layout.addWidget(self.progress_bar)
 
-        main_layout.addWidget(QLabel("Console Output:"))
+        # Console Output Header with History Toggle
+        console_header_layout = QHBoxLayout()
+        console_header_layout.addWidget(QLabel("Console Output:"))
+        
+        self.chk_show_history = QCheckBox("Show Command History")
+        self.chk_show_history.toggled.connect(self.toggle_history_panel)
+        console_header_layout.addWidget(self.chk_show_history)
+        console_header_layout.addStretch()
+        
+        main_layout.addLayout(console_header_layout)
         main_layout.addWidget(self.console, stretch=1)
+        
+        self.splitter.addWidget(left_widget)
+
+        # Right Panel (Command History)
+        self.history_widget = QWidget()
+        history_layout = QVBoxLayout(self.history_widget)
+        
+        history_title = QLabel("Command History")
+        history_title.setStyleSheet("font-weight: bold;")
+        history_layout.addWidget(history_title)
+        
+        self.list_history = QListWidget()
+        self.list_history.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.list_history.setWordWrap(True)
+        history_layout.addWidget(self.list_history, stretch=1)
+        
+        btn_clear_history = QPushButton("Clear History")
+        btn_clear_history.clicked.connect(self.list_history.clear)
+        history_layout.addWidget(btn_clear_history)
+
+        self.splitter.addWidget(self.history_widget)
+        
+        # Initial state: history hidden
+        self.history_widget.setVisible(False)
+        self.splitter.setSizes([800, 0])
+
+    def toggle_history_panel(self, checked):
+        self.history_widget.setVisible(checked)
+        if checked:
+            self.splitter.setSizes([700, 300]) # Example weights
+        else:
+            self.splitter.setSizes([1000, 0])
+
+    def log_command(self, cmd_str):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.list_history.addItem(f"[{timestamp}] {cmd_str}\n")
+        self.list_history.scrollToBottom()
 
     def setup_connection_tab(self):
         tab = QWidget()
@@ -264,19 +320,25 @@ class MainWindow(QMainWindow):
         script_group = QGroupBox("Custom Scripts (Advanced)")
         script_layout = QGridLayout(script_group)
         
+        self.chk_stop_script = QCheckBox("Use Stop Script (Down):")
         self.combo_stop_script = QComboBox()
         self.combo_stop_script.setEditable(True)
         self.combo_stop_script.setPlaceholderText("Optional: Select .sh to run INSTEAD of 'docker-compose down'")
         self.combo_stop_script.setMinimumWidth(300)
+        self.combo_stop_script.setEnabled(False)
+        self.chk_stop_script.toggled.connect(self.combo_stop_script.setEnabled)
         
+        self.chk_start_script = QCheckBox("Use Start Script (Up):")
         self.combo_start_script = QComboBox()
         self.combo_start_script.setEditable(True)
         self.combo_start_script.setPlaceholderText("Optional: Select .sh to run INSTEAD of 'docker-compose up'")
         self.combo_start_script.setMinimumWidth(300)
+        self.combo_start_script.setEnabled(False)
+        self.chk_start_script.toggled.connect(self.combo_start_script.setEnabled)
 
-        script_layout.addWidget(QLabel("Stop Script (Down):"), 0, 0)
+        script_layout.addWidget(self.chk_stop_script, 0, 0)
         script_layout.addWidget(self.combo_stop_script, 0, 1)
-        script_layout.addWidget(QLabel("Start Script (Up):"), 1, 0)
+        script_layout.addWidget(self.chk_start_script, 1, 0)
         script_layout.addWidget(self.combo_start_script, 1, 1)
         
         layout.addWidget(script_group)
@@ -727,11 +789,19 @@ class MainWindow(QMainWindow):
                 stop_match = next((s for s in scripts if 'down' in s.lower()), None)
                 start_match = next((s for s in scripts if 'up' in s.lower()), None)
                 
-                if stop_match: self.combo_stop_script.setCurrentText(stop_match)
-                else: self.combo_stop_script.setCurrentIndex(-1)
+                if stop_match:
+                    self.combo_stop_script.setCurrentText(stop_match)
+                    self.chk_stop_script.setChecked(True)
+                else:
+                    self.combo_stop_script.setCurrentIndex(-1)
+                    self.chk_stop_script.setChecked(False)
 
-                if start_match: self.combo_start_script.setCurrentText(start_match)
-                else: self.combo_start_script.setCurrentIndex(-1)
+                if start_match:
+                    self.combo_start_script.setCurrentText(start_match)
+                    self.chk_start_script.setChecked(True)
+                else:
+                    self.combo_start_script.setCurrentIndex(-1)
+                    self.chk_start_script.setChecked(False)
 
                 self.log(f"Detected: {path_result}. Found {len(files)} config files, {len(scripts)} scripts.")
             else:
@@ -752,8 +822,9 @@ class MainWindow(QMainWindow):
              return
 
         stop_script = self.combo_stop_script.currentText().strip()
+        use_script = self.chk_stop_script.isChecked()
         
-        if stop_script:
+        if use_script and stop_script:
              self.log(f"Stopping Service using SCRIPT: {stop_script} in {stop_target_dir}...")
         else:
              self.log(f"Stopping Service in {stop_target_dir} ({compose_file})...")
@@ -762,7 +833,7 @@ class MainWindow(QMainWindow):
             ok, msg = self.ssh_manager.connect(host, port, user, pwd, key)
             if not ok: return False, msg
             
-            if stop_script:
+            if use_script and stop_script:
                 # Custom Script Execution
                 cmd = f"cd {stop_target_dir} && sudo -S bash {stop_script}"
             else:
@@ -770,10 +841,12 @@ class MainWindow(QMainWindow):
                 # Use -f checks
                 cmd = f"if [ -d {stop_target_dir} ]; then cd {stop_target_dir} && if [ -f {compose_file} ]; then docker-compose -f {compose_file} down; else echo '{compose_file} not found in {stop_target_dir}'; fi; else echo 'Directory {stop_target_dir} not found'; fi"
             
+            self.worker.command_signal.emit(cmd)
             return self.ssh_manager.execute_command(cmd, output_callback=self.worker.log_signal.emit, sudo_password=pwd)
 
         self.worker = WorkerThread(task)
         self.worker.log_signal.connect(self.log)
+        self.worker.command_signal.connect(self.log_command)
         self.worker.finished_signal.connect(lambda s, m: self.log(f"Stop Service Finished: {m}"))
         self.worker.start()
 
@@ -796,10 +869,12 @@ class MainWindow(QMainWindow):
             # Backup command: tar -czvf dir_bak_ts.tar.gz dir
             # Use sudo -S for permission
             cmd = f"if [ -d {stop_target_dir} ]; then sudo -S tar -czvf {stop_target_dir}_bak_{ts}.tar.gz {stop_target_dir}; echo 'Backup created at {stop_target_dir}_bak_{ts}.tar.gz'; else echo 'Directory {stop_target_dir} not found, nothing to backup'; fi"
+            self.worker.command_signal.emit(cmd)
             return self.ssh_manager.execute_command(cmd, output_callback=self.worker.log_signal.emit, sudo_password=pwd)
 
         self.worker = WorkerThread(task)
         self.worker.log_signal.connect(self.log)
+        self.worker.command_signal.connect(self.log_command)
         self.worker.finished_signal.connect(lambda s, m: self.log(f"Backup Result: {m}"))
         self.worker.start()
 
@@ -815,10 +890,12 @@ class MainWindow(QMainWindow):
             
             # tar -xzvf [file] -C [dest] or cd [dest] && tar...
             cmd = f"cd {remote_base} && sudo -S tar --overwrite -xzvf {local_pack}"
+            self.worker.command_signal.emit(cmd)
             return self.ssh_manager.execute_command(cmd, output_callback=self.worker.log_signal.emit, sudo_password=pwd)
 
         self.worker = WorkerThread(task)
         self.worker.log_signal.connect(self.log)
+        self.worker.command_signal.connect(self.log_command)
         self.worker.finished_signal.connect(lambda s, m: self.log(f"Extraction Finished: {m}"))
         self.worker.start()
 
@@ -827,8 +904,9 @@ class MainWindow(QMainWindow):
         _, _, _, start_target_dir, _, compose_file = self._get_common_paths()
         
         start_script = self.combo_start_script.currentText().strip()
+        use_script = self.chk_start_script.isChecked()
         
-        if start_script:
+        if use_script and start_script:
              self.log(f"Starting Service using SCRIPT: {start_script} in {start_target_dir}...")
         else:
              self.log(f"Starting Service in {start_target_dir} ({compose_file})...")
@@ -837,15 +915,17 @@ class MainWindow(QMainWindow):
             ok, msg = self.ssh_manager.connect(host, port, user, pwd, key)
             if not ok: return False, msg
             
-            if start_script:
+            if use_script and start_script:
                 # Custom Script Execution
                 cmd = f"cd {start_target_dir} && sudo -S bash {start_script}"
             else:
                 cmd = f"cd {start_target_dir} && if [ -f {compose_file} ]; then docker-compose -f {compose_file} up -d --build; else echo 'Error: {compose_file} not found'; exit 1; fi"
+            self.worker.command_signal.emit(cmd)
             return self.ssh_manager.execute_command(cmd, output_callback=self.worker.log_signal.emit, sudo_password=pwd)
 
         self.worker = WorkerThread(task)
         self.worker.log_signal.connect(self.log)
+        self.worker.command_signal.connect(self.log_command)
         self.worker.finished_signal.connect(lambda s, m: self.log(f"Start Service Finished: {m}"))
         self.worker.start()
 
@@ -895,27 +975,38 @@ class MainWindow(QMainWindow):
                 commands.append(backup_cmd)
             
             
+            stop_script = self.combo_stop_script.currentText().strip()
+            use_stop_script = self.chk_stop_script.isChecked()
+            
+            if use_stop_script and stop_script:
+                stop_cmd = f"if [ -d {stop_target_dir} ]; then cd {stop_target_dir} && sudo -S bash {stop_script}; else echo 'Stop target dir not found, skipping down'; fi"
+            else:
+                stop_cmd = f"if [ -d {stop_target_dir} ]; then cd {stop_target_dir} && if [ -f {compose_file} ]; then docker-compose -f {compose_file} down; else echo 'No {compose_file} at stop target, skipping down'; fi; else echo 'Stop target dir not found, skipping down'; fi"
+
+            start_script = self.combo_start_script.currentText().strip()
+            use_start_script = self.chk_start_script.isChecked()
+            
+            if use_start_script and start_script:
+                start_cmd = f"cd {start_target_dir} && sudo -S bash {start_script}"
+            else:
+                start_cmd = f"cd {start_target_dir} && if [ -f {compose_file} ]; then docker-compose -f {compose_file} up -d --build; else echo 'Error: {compose_file} not found'; exit 1; fi"
+
             commands.extend([
-                # Stop Old (if path distinct or same, doesn't matter, simply run down there)
-                f"if [ -d {stop_target_dir} ]; then cd {stop_target_dir} && if [ -f {compose_file} ]; then docker-compose -f {compose_file} down; else echo 'No {compose_file} at stop target, skipping down'; fi; else echo 'Stop target dir not found, skipping down'; fi",
-                
-                # Back to base & Extract
+                stop_cmd,
                 f"cd {remote_base}",
                 f"sudo -S tar --overwrite -xzvf {local_pack}", 
-                
-                # Enter & Start New
-                f"cd {start_target_dir}",
-                f"if [ -f {compose_file} ]; then echo 'Found {compose_file}'; else echo 'Error: {compose_file} not found'; exit 1; fi",
-                f"docker-compose -f {compose_file} up -d --build"
+                start_cmd
             ])
             
             full_cmd = " && ".join(commands)
             self.worker.log_signal.emit(f"Executing: {full_cmd}")
             
+            self.worker.command_signal.emit(full_cmd)
             ok, msg = self.ssh_manager.execute_command(full_cmd, output_callback=self.worker.log_signal.emit, sudo_password=pwd)
             return ok, msg
 
         self.worker = WorkerThread(task)
         self.worker.log_signal.connect(self.log)
+        self.worker.command_signal.connect(self.log_command)
         self.worker.finished_signal.connect(lambda s, m: self.log(f"One-Click Deploy Finished: {m}"))
         self.worker.start()
