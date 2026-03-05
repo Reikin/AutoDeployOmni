@@ -362,6 +362,9 @@ class MainWindow(QMainWindow):
         btn_extract = QPushButton("3. Extract New")
         btn_extract.clicked.connect(self.run_extract)
 
+        btn_build = QPushButton("3.5 Build")
+        btn_build.clicked.connect(self.run_build_image)
+
         btn_start = QPushButton("4. Start New")
         btn_start.clicked.connect(self.run_start_service)
         
@@ -369,6 +372,7 @@ class MainWindow(QMainWindow):
         steps_layout.addWidget(btn_upload)
         steps_layout.addWidget(btn_stop)
         steps_layout.addWidget(btn_extract)
+        steps_layout.addWidget(btn_build)
         steps_layout.addWidget(btn_start)
         
         a_layout.addLayout(steps_layout)
@@ -743,24 +747,37 @@ class MainWindow(QMainWindow):
             if not ok: return False, msg
             
             # 1. Detect service
-            found, path_result, detected_file = self.ssh_manager.detect_running_service(search_name, search_path=search_path_fallback)
+            found, result_data = self.ssh_manager.detect_running_service(search_name, search_path=search_path_fallback)
             
             if not found:
-                 return False, path_result # error msg
+                 return False, result_data # error msg
             
-            # 2. List YML files in detected path
-            files_ok, files = self.ssh_manager.list_working_dir_files(path_result)
-            if not files_ok: files = [] 
-            
-            # 3. List .sh files
-            scripts_ok, scripts = self.ssh_manager.list_scripts(path_result)
-            if not scripts_ok: scripts = []
-            
-            return True, (path_result, detected_file, files, scripts)
+            # Prepare data for all found targets
+            full_results = []
+            for path_result, detected_file in result_data:
+                # 2. List YML files in detected path
+                files_ok, files = self.ssh_manager.list_working_dir_files(path_result)
+                if not files_ok: files = [] 
+                
+                # 3. List .sh files
+                scripts_ok, scripts = self.ssh_manager.list_scripts(path_result)
+                if not scripts_ok: scripts = []
+                
+                full_results.append((path_result, detected_file, files, scripts))
+                
+            return True, full_results
             
         def on_finished(success, result):
-            if success:
-                path_result, detected_file, files, scripts = result
+            if not success:
+                self.log(f"Detection failed: {result}")
+                QMessageBox.warning(self, "Detection Failed", f"Could not detect running service.\n{result}")
+                return
+
+            full_results = result
+            if not full_results:
+                return
+
+            def apply_target(path_result, detected_file, files, scripts):
                 self.input_target_path.setText(path_result)
                 
                 # --- YML Files ---
@@ -804,9 +821,21 @@ class MainWindow(QMainWindow):
                     self.chk_start_script.setChecked(False)
 
                 self.log(f"Detected: {path_result}. Found {len(files)} config files, {len(scripts)} scripts.")
+                
+            if len(full_results) == 1:
+                path_result, detected_file, files, scripts = full_results[0]
+                apply_target(path_result, detected_file, files, scripts)
             else:
-                self.log(f"Detection failed: {result}")
-                QMessageBox.warning(self, "Detection Failed", f"Could not detect running service.\n{result}")
+                items = [f"{item[0]} [{item[1]}]" for item in full_results]
+                selected_item, ok = QInputDialog.getItem(self, "Select Service Path",
+                                                         "Multiple services detected, please choose one:",
+                                                         items, 0, False)
+                if ok and selected_item:
+                    idx = items.index(selected_item)
+                    path_result, detected_file, files, scripts = full_results[idx]
+                    apply_target(path_result, detected_file, files, scripts)
+                else:
+                    self.log("Service selection cancelled.")
 
         self.worker = WorkerThread(task)
         self.worker.log_signal.connect(self.log)
@@ -839,7 +868,7 @@ class MainWindow(QMainWindow):
             else:
                 # Standard Docker Compose
                 # Use -f checks
-                cmd = f"if [ -d {stop_target_dir} ]; then cd {stop_target_dir} && if [ -f {compose_file} ]; then docker-compose -f {compose_file} down; else echo '{compose_file} not found in {stop_target_dir}'; fi; else echo 'Directory {stop_target_dir} not found'; fi"
+                cmd = f"if [ -d {stop_target_dir} ]; then cd {stop_target_dir} && if [ -f {compose_file} ]; then docker compose -f {compose_file} down; else echo '{compose_file} not found in {stop_target_dir}'; fi; else echo 'Directory {stop_target_dir} not found'; fi"
             
             self.worker.command_signal.emit(cmd)
             return self.ssh_manager.execute_command(cmd, output_callback=self.worker.log_signal.emit, sudo_password=pwd)
@@ -899,6 +928,26 @@ class MainWindow(QMainWindow):
         self.worker.finished_signal.connect(lambda s, m: self.log(f"Extraction Finished: {m}"))
         self.worker.start()
 
+    def run_build_image(self):
+        host, port, user, pwd, key = self.get_ssh_details()
+        _, _, _, start_target_dir, _, compose_file = self._get_common_paths()
+        
+        self.log(f"Building Service in {start_target_dir} ({compose_file})...")
+        
+        def task():
+            ok, msg = self.ssh_manager.connect(host, port, user, pwd, key)
+            if not ok: return False, msg
+            
+            cmd = f"cd {start_target_dir} && if [ -f {compose_file} ]; then docker compose -f {compose_file} build; else echo 'Error: {compose_file} not found'; exit 1; fi"
+            self.worker.command_signal.emit(cmd)
+            return self.ssh_manager.execute_command(cmd, output_callback=self.worker.log_signal.emit, sudo_password=pwd)
+
+        self.worker = WorkerThread(task)
+        self.worker.log_signal.connect(self.log)
+        self.worker.command_signal.connect(self.log_command)
+        self.worker.finished_signal.connect(lambda s, m: self.log(f"Build Service Finished: {m}"))
+        self.worker.start()
+
     def run_start_service(self):
         host, port, user, pwd, key = self.get_ssh_details()
         _, _, _, start_target_dir, _, compose_file = self._get_common_paths()
@@ -919,7 +968,7 @@ class MainWindow(QMainWindow):
                 # Custom Script Execution
                 cmd = f"cd {start_target_dir} && sudo -S bash {start_script}"
             else:
-                cmd = f"cd {start_target_dir} && if [ -f {compose_file} ]; then docker-compose -f {compose_file} up -d --build; else echo 'Error: {compose_file} not found'; exit 1; fi"
+                cmd = f"cd {start_target_dir} && if [ -f {compose_file} ]; then docker compose -f {compose_file} up -d --build; else echo 'Error: {compose_file} not found'; exit 1; fi"
             self.worker.command_signal.emit(cmd)
             return self.ssh_manager.execute_command(cmd, output_callback=self.worker.log_signal.emit, sudo_password=pwd)
 

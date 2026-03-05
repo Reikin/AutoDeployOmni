@@ -102,12 +102,13 @@ class SSHManager:
         Detect the working directory and compose file by project name.
         1. Search Docker containers (running or stopped).
         2. Fallback: Search directories in search_path (default: ~).
-        Returns (True, working_dir, compose_filename) if found, (False, error_msg, None) otherwise.
+        Returns (True, [(working_dir, compose_filename), ...]) if found, (False, error_msg) otherwise.
         """
         if not self.client:
-            return False, "Not connected", None
+            return False, "Not connected"
 
         try:
+            results = []
             # 1. Find container ID by name filter (Include stopped containers with -a)
             cmd_ps = f"docker ps -a --filter \"name={project_name}\" --format \"{{{{.ID}}}}\""
             stdin, stdout, stderr = self.client.exec_command(cmd_ps)
@@ -115,45 +116,54 @@ class SSHManager:
             ids = [x for x in ids if x] 
             
             if ids:
-                # 2. Inspect the first container
-                container_id = ids[0]
-                # Fetch both working_dir and config_files
-                cmd_inspect = f"docker inspect --format \"{{{{ index .Config.Labels \\\"com.docker.compose.project.working_dir\\\" }}}}|{{{{ index .Config.Labels \\\"com.docker.compose.project.config_files\\\" }}}}\" {container_id}"
-                
-                stdin, stdout, stderr = self.client.exec_command(cmd_inspect)
-                output = stdout.read().decode().strip()
-                
-                if output and "|" in output:
-                    working_dir, config_files = output.split("|", 1)
+                for container_id in ids:
+                    cmd_inspect = f"docker inspect --format \"{{{{ index .Config.Labels \\\"com.docker.compose.project.working_dir\\\" }}}}|{{{{ index .Config.Labels \\\"com.docker.compose.project.config_files\\\" }}}}\" {container_id}"
                     
-                    if working_dir == '<no value>': working_dir = ""
-                    if config_files == '<no value>': config_files = ""
+                    stdin, stdout, stderr = self.client.exec_command(cmd_inspect)
+                    output = stdout.read().decode().strip()
                     
-                    if working_dir:
-                        # Parse config file
-                        compose_filename = "docker-compose.yml" # Default
-                        if config_files:
-                            first_file = config_files.split(",")[0].strip()
-                            if first_file:
-                                compose_filename = os.path.basename(first_file)
-                        return True, working_dir, compose_filename
+                    if output and "|" in output:
+                        working_dir, config_files = output.split("|", 1)
+                        
+                        if working_dir == '<no value>': working_dir = ""
+                        if config_files == '<no value>': config_files = ""
+                        
+                        if working_dir:
+                            # Parse config file
+                            compose_filename = "docker-compose.yml" # Default
+                            if config_files:
+                                first_file = config_files.split(",")[0].strip()
+                                if first_file:
+                                    compose_filename = os.path.basename(first_file)
+                            
+                            entry = (working_dir, compose_filename)
+                            if entry not in results:
+                                results.append(entry)
 
             # 3. Fallback: Search File System if Docker yielded no results or inspection failed
-            if not search_path:
-                search_path = "~"
+            if not results:
+                if not search_path:
+                    search_path = "~"
+                    
+                # Search in target dir for directories matching the keyword
+                cmd_find = f"find {search_path} -maxdepth 3 -type d -name \"*{project_name}*\" 2>/dev/null"
+                stdin, stdout, stderr = self.client.exec_command(cmd_find)
+                found_paths = stdout.read().decode().strip().split('\n')
                 
-            # Search in target dir for directories matching the keyword
-            cmd_find = f"find {search_path} -maxdepth 3 -type d -name \"*{project_name}*\" 2>/dev/null | head -n 1"
-            stdin, stdout, stderr = self.client.exec_command(cmd_find)
-            found_path = stdout.read().decode().strip()
+                for fpath in found_paths:
+                    fpath = fpath.strip()
+                    if fpath:
+                        entry = (fpath, "docker-compose.yml")
+                        if entry not in results:
+                            results.append(entry)
             
-            if found_path:
-                return True, found_path, None
+            if results:
+                return True, results
 
-            return False, f"No container or directory found for '{project_name}'", None
+            return False, f"No container or directory found for '{project_name}'"
 
         except Exception as e:
-            return False, f"Detection failed: {str(e)}", None
+            return False, f"Detection failed: {str(e)}"
 
     def list_working_dir_files(self, remote_dir):
         """
