@@ -1,5 +1,8 @@
 # Azure Deployment Tool
 
+## 前言
+算是一個基於Antigravity(Gemini3.0)全程不參與coding，全部vibe coding的工具產物
+
 這是一個基於 PyQt6 構建的桌面應用程式，旨在簡化將本地專案部署到 Azure VM (或任何 Linux SSH 伺服器) 的流程。
 專為 Python/Docker 專案設計，支援一鍵部署、自動與 Git 整合、以及遠端 Docker Compose 管理。
 
